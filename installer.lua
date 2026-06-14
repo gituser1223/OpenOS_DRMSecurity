@@ -3,7 +3,6 @@
 
 local component = component
 local computer = computer
-local fs = require("filesystem")
 
 local INSTALLER_VERSION = "1.0.0"
 
@@ -16,20 +15,11 @@ local function log(msg, level)
   print(string.format("[%s] %s", level, msg))
 end
 
-local function hexToString(s)
-  return s
-end
-
-local function stringToHex(s)
-  return s
-end
-
 -- Generate deterministic 16-char alphanumeric Lock ID from fingerprint
 local function generateLockId(fingerprint)
   local result = ""
   local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
   
-  -- Use fingerprint hash to seed deterministic generation
   local seed = 0
   for i = 1, #fingerprint do
     seed = (seed * 31 + string.byte(fingerprint, i)) % 2147483647
@@ -64,17 +54,10 @@ local function collectCriticalComponents()
   
   local components = {}
   
-  -- Motherboard (board)
-  local boardCID = getComponentCID("computer")
-  if boardCID then
-    components.board = boardCID
-    log("  [OK] Motherboard: " .. boardCID, "INFO")
-  else
-    components.board = computer.address()
-    log("  [OK] Motherboard (from computer): " .. components.board, "INFO")
-  end
+  local boardCID = computer.address()
+  components.board = boardCID
+  log("  [OK] Motherboard: " .. boardCID, "INFO")
   
-  -- EEPROM
   local eepromCID = getComponentCID("eeprom")
   if eepromCID then
     components.eeprom = eepromCID
@@ -84,7 +67,6 @@ local function collectCriticalComponents()
     return nil
   end
   
-  -- Primary Filesystem
   local fsCID = getComponentCID("filesystem")
   if fsCID then
     components.filesystem = fsCID
@@ -102,7 +84,6 @@ local function collectOptionalComponents()
   
   local optional = {}
   
-  -- GPU
   local gpuCID = getComponentCID("gpu")
   if gpuCID then
     optional.gpu = gpuCID
@@ -111,7 +92,6 @@ local function collectOptionalComponents()
     log("  [--] GPU not found (optional)", "INFO")
   end
   
-  -- Screen
   local screenCID = getComponentCID("screen")
   if screenCID then
     optional.screen = screenCID
@@ -120,7 +100,6 @@ local function collectOptionalComponents()
     log("  [--] Screen not found (optional)", "INFO")
   end
   
-  -- Modem
   local modemCID = getComponentCID("modem")
   if modemCID then
     optional.modem = modemCID
@@ -129,7 +108,6 @@ local function collectOptionalComponents()
     log("  [--] Modem not found (optional)", "INFO")
   end
   
-  -- Robot
   local robotCID = getComponentCID("robot")
   if robotCID then
     optional.robot = robotCID
@@ -138,7 +116,6 @@ local function collectOptionalComponents()
     log("  [--] Robot not found (optional)", "INFO")
   end
   
-  -- Redstone
   local redstoneCID = getComponentCID("redstone")
   if redstoneCID then
     optional.redstone = redstoneCID
@@ -159,12 +136,10 @@ local function generateFingerprint(critical, optional)
   
   local fpList = {}
   
-  -- Add critical components (always present)
   table.insert(fpList, "board:" .. critical.board)
   table.insert(fpList, "eeprom:" .. critical.eeprom)
   table.insert(fpList, "filesystem:" .. critical.filesystem)
   
-  -- Add optional components (only if present)
   if optional.gpu then
     table.insert(fpList, "gpu:" .. optional.gpu)
   end
@@ -181,10 +156,8 @@ local function generateFingerprint(critical, optional)
     table.insert(fpList, "redstone:" .. optional.redstone)
   end
   
-  -- Sort for stability
   table.sort(fpList)
   
-  -- Join with pipe separator
   local fingerprint = table.concat(fpList, "|")
   
   log("  Fingerprint: " .. fingerprint, "INFO")
@@ -223,24 +196,41 @@ end
 -- BIOS TEMPLATE LOADING & SUBSTITUTION
 -- ============================================================================
 
-local function loadBiosTemplate()
+local function loadBiosTemplate(fsCID)
   log("Loading BIOS template...")
   
   local templatePath = "/secure_bios_template.lua"
+  local fs = component.proxy(fsCID)
+  
+  if not fs then
+    log("  Cannot access filesystem", "ERROR")
+    return nil
+  end
   
   if not fs.exists(templatePath) then
     log("  Template not found at " .. templatePath, "ERROR")
     return nil
   end
   
-  local handle = fs.open(templatePath, "r")
+  local handle, err = fs.open(templatePath, "r")
   if not handle then
-    log("  Cannot open template file", "ERROR")
+    log("  Cannot open template file: " .. tostring(err), "ERROR")
     return nil
   end
   
-  local content = handle:read("*a")
-  handle:close()
+  local content = ""
+  local chunk_size = 2048
+  
+  repeat
+    local chunk = fs.read(handle, chunk_size)
+    if chunk then
+      content = content .. chunk
+    else
+      break
+    end
+  until not chunk
+  
+  fs.close(handle)
   
   log("  Template loaded (" .. #content .. " bytes)", "INFO")
   return content
@@ -251,15 +241,12 @@ local function substitutePlaceholders(template, critical, optional, license)
   
   local result = template
   
-  -- Replace critical CIDs
   result = result:gsub("{{BOARD_CID}}", license.board)
   result = result:gsub("{{EEPROM_CID}}", license.eeprom)
   result = result:gsub("{{FS_CID}}", license.filesystem)
   
-  -- Replace fingerprint
   result = result:gsub("{{FINGERPRINT}}", license.fingerprint)
   
-  -- Replace lock ID
   result = result:gsub("{{LOCK_ID}}", license.lockId)
   
   log("  Substitution complete", "INFO")
@@ -270,24 +257,29 @@ end
 -- BACKUP & FLASH
 -- ============================================================================
 
-local function createBackup(biosContent)
+local function createBackup(biosContent, fsCID)
   log("Creating BIOS backup...")
   
   local backupPath = "/tmp/backup_bios.lua"
+  local fs = component.proxy(fsCID)
   
-  -- Create /tmp if needed
+  if not fs then
+    log("  Cannot access filesystem", "ERROR")
+    return false
+  end
+  
   if not fs.exists("/tmp") then
     fs.makeDirectory("/tmp")
   end
   
-  local handle = fs.open(backupPath, "w")
+  local handle, err = fs.open(backupPath, "w")
   if not handle then
-    log("  Cannot create backup", "ERROR")
+    log("  Cannot create backup: " .. tostring(err), "ERROR")
     return false
   end
   
-  handle:write(biosContent)
-  handle:close()
+  fs.write(handle, biosContent)
+  fs.close(handle)
   
   log("  Backup created: " .. backupPath, "INFO")
   return true
@@ -307,18 +299,13 @@ local function flashEEPROM(biosContent, eepromCID)
     return false
   end
   
-  -- Set boot address to current filesystem
-  local bootAddr = getComponentCID("filesystem")
-  if bootAddr then
-    eeprom.setData(bootAddr)
-    log("  Boot address set to filesystem: " .. bootAddr, "INFO")
-  end
+  log("  BIOS size: " .. #biosContent .. " bytes", "INFO")
+  log("  EEPROM capacity: 4096 bytes", "INFO")
   
-  -- Set label
   eeprom.setLabel("SecureBoot")
   log("  EEPROM label set to 'SecureBoot'", "INFO")
   
-  log("  EEPROM flashing not implemented in sandbox (manual operation required)", "WARN")
+  log("  WARN: Actual EEPROM flashing requires manual operation in sandbox", "WARN")
   return true
 end
 
@@ -331,7 +318,6 @@ local function main()
   log("OpenOS SecureBoot DRM Installer v" .. INSTALLER_VERSION, "INFO")
   log("========================================", "INFO")
   
-  -- Step 1: Collect critical components
   local critical = collectCriticalComponents()
   if not critical then
     log("Installation failed: missing critical components", "ERROR")
@@ -340,23 +326,19 @@ local function main()
   
   print("")
   
-  -- Step 2: Collect optional components
   local optional = collectOptionalComponents()
   
   print("")
   
-  -- Step 3: Generate fingerprint
   local fingerprint = generateFingerprint(critical, optional)
   
   print("")
   
-  -- Step 4: Generate license
   local license = generateLicense(critical, optional, fingerprint)
   
   print("")
   
-  -- Step 5: Load BIOS template
-  local biosTemplate = loadBiosTemplate()
+  local biosTemplate = loadBiosTemplate(critical.filesystem)
   if not biosTemplate then
     log("Installation failed: BIOS template not found", "ERROR")
     return false
@@ -364,20 +346,17 @@ local function main()
   
   print("")
   
-  -- Step 6: Substitute placeholders
   local finalBios = substitutePlaceholders(biosTemplate, critical, optional, license)
   
   print("")
   
-  -- Step 7: Create backup
-  if not createBackup(finalBios) then
+  if not createBackup(finalBios, critical.filesystem) then
     log("Installation failed: cannot create backup", "ERROR")
     return false
   end
   
   print("")
   
-  -- Step 8: Flash EEPROM
   if not flashEEPROM(finalBios, critical.eeprom) then
     log("Installation failed: cannot flash EEPROM", "ERROR")
     return false
@@ -394,7 +373,6 @@ local function main()
   return true
 end
 
--- Run installer
 if not main() then
   os.exit(1)
 end
