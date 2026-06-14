@@ -274,13 +274,17 @@ local function flashEEPROM(biosContent, eepromCID, fsCID)
   if input:lower() == "y" or input:lower() == "yes" then
     log("Starting EEPROM flash...", "INFO")
     
-    local fs = component.proxy(fsCID)
-    if fs then
-      local bootAddr = getComponentCID("filesystem")
-      if bootAddr then
-        eeprom.setData(bootAddr)
-        log("  Boot address set to: " .. bootAddr, "INFO")
-      end
+    log("  Clearing EEPROM...", "INFO")
+    eeprom.setData()
+    
+    log("  Writing BIOS to EEPROM...", "INFO")
+    eeprom.set(biosContent)
+    
+    log("  Setting boot address...", "INFO")
+    local bootAddr = getComponentCID("filesystem")
+    if bootAddr then
+      eeprom.setData(bootAddr)
+      log("  Boot address set to: " .. bootAddr, "INFO")
     end
     
     eeprom.setLabel("SecureBoot")
