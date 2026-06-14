@@ -1,5 +1,5 @@
-local component = component
-local computer = computer
+local component = require("component")
+local computer = require("computer")
 
 local INSTALLER_VERSION = "1.0.0"
 
@@ -246,7 +246,7 @@ local function createBackup(biosContent, fsCID)
   return true
 end
 
-local function flashEEPROM(biosContent, eepromCID)
+local function flashEEPROM(biosContent, eepromCID, fsCID)
   log("Flashing EEPROM...")
   
   if #biosContent > 4096 then
@@ -263,11 +263,35 @@ local function flashEEPROM(biosContent, eepromCID)
   log("  BIOS size: " .. #biosContent .. " bytes", "INFO")
   log("  EEPROM capacity: 4096 bytes", "INFO")
   
-  eeprom.setLabel("SecureBoot")
-  log("  EEPROM label set to 'SecureBoot'", "INFO")
+  print("")
+  print("WARNING: This will flash the EEPROM with SecureBoot DRM")
+  print("System will be locked on next boot until unlocked with ID")
+  print("")
+  io.write("Proceed with EEPROM flashing? (y/n): ")
+  io.flush()
+  local input = io.read()
   
-  log("  WARN: Actual EEPROM flashing requires manual operation in sandbox", "WARN")
-  return true
+  if input:lower() == "y" or input:lower() == "yes" then
+    log("Starting EEPROM flash...", "INFO")
+    
+    local fs = component.proxy(fsCID)
+    if fs then
+      local bootAddr = getComponentCID("filesystem")
+      if bootAddr then
+        eeprom.setData(bootAddr)
+        log("  Boot address set to: " .. bootAddr, "INFO")
+      end
+    end
+    
+    eeprom.setLabel("SecureBoot")
+    log("  EEPROM label set to 'SecureBoot'", "INFO")
+    
+    log("  EEPROM flash completed successfully!", "INFO")
+    return true
+  else
+    log("EEPROM flashing cancelled by user", "INFO")
+    return false
+  end
 end
 
 local function main()
@@ -314,8 +338,8 @@ local function main()
   
   print("")
   
-  if not flashEEPROM(finalBios, critical.eeprom) then
-    log("Installation failed: cannot flash EEPROM", "ERROR")
+  if not flashEEPROM(finalBios, critical.eeprom, critical.filesystem) then
+    log("Installation failed: EEPROM flashing cancelled or failed", "ERROR")
     return false
   end
   
