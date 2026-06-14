@@ -1,21 +1,13 @@
--- OpenOS SecureBoot DRM Installer
--- Collects hardware CIDs, generates fingerprint, and flashes secure BIOS
-
 local component = component
 local computer = computer
 
 local INSTALLER_VERSION = "1.0.0"
-
--- ============================================================================
--- UTILITY FUNCTIONS
--- ============================================================================
 
 local function log(msg, level)
   level = level or "INFO"
   print(string.format("[%s] %s", level, msg))
 end
 
--- Generate deterministic 16-char alphanumeric Lock ID from fingerprint
 local function generateLockId(fingerprint)
   local result = ""
   local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -32,10 +24,6 @@ local function generateLockId(fingerprint)
   
   return result
 end
-
--- ============================================================================
--- HARDWARE DETECTION
--- ============================================================================
 
 local function getComponentCID(componentType, index)
   index = index or 1
@@ -54,9 +42,8 @@ local function collectCriticalComponents()
   
   local components = {}
   
-  local boardCID = computer.address()
-  components.board = boardCID
-  log("  [OK] Motherboard: " .. boardCID, "INFO")
+  components.board = computer.address()
+  log("  [OK] Motherboard: " .. components.board, "INFO")
   
   local eepromCID = getComponentCID("eeprom")
   if eepromCID then
@@ -88,48 +75,34 @@ local function collectOptionalComponents()
   if gpuCID then
     optional.gpu = gpuCID
     log("  [OK] GPU: " .. gpuCID, "INFO")
-  else
-    log("  [--] GPU not found (optional)", "INFO")
   end
   
   local screenCID = getComponentCID("screen")
   if screenCID then
     optional.screen = screenCID
     log("  [OK] Screen: " .. screenCID, "INFO")
-  else
-    log("  [--] Screen not found (optional)", "INFO")
   end
   
   local modemCID = getComponentCID("modem")
   if modemCID then
     optional.modem = modemCID
     log("  [OK] Modem: " .. modemCID, "INFO")
-  else
-    log("  [--] Modem not found (optional)", "INFO")
   end
   
   local robotCID = getComponentCID("robot")
   if robotCID then
     optional.robot = robotCID
     log("  [OK] Robot: " .. robotCID, "INFO")
-  else
-    log("  [--] Robot not found (optional)", "INFO")
   end
   
   local redstoneCID = getComponentCID("redstone")
   if redstoneCID then
     optional.redstone = redstoneCID
     log("  [OK] Redstone: " .. redstoneCID, "INFO")
-  else
-    log("  [--] Redstone not found (optional)", "INFO")
   end
   
   return optional
 end
-
--- ============================================================================
--- FINGERPRINT GENERATION
--- ============================================================================
 
 local function generateFingerprint(critical, optional)
   log("Generating fingerprint...")
@@ -164,10 +137,6 @@ local function generateFingerprint(critical, optional)
   return fingerprint
 end
 
--- ============================================================================
--- LICENSE GENERATION
--- ============================================================================
-
 local function generateLicense(critical, optional, fingerprint)
   log("Generating LICENSE structure...")
   
@@ -191,10 +160,6 @@ local function generateLicense(critical, optional, fingerprint)
   
   return license
 end
-
--- ============================================================================
--- BIOS TEMPLATE LOADING & SUBSTITUTION
--- ============================================================================
 
 local function loadBiosTemplate(fsCID)
   log("Loading BIOS template...")
@@ -253,10 +218,6 @@ local function substitutePlaceholders(template, critical, optional, license)
   return result
 end
 
--- ============================================================================
--- BACKUP & FLASH
--- ============================================================================
-
 local function createBackup(biosContent, fsCID)
   log("Creating BIOS backup...")
   
@@ -308,10 +269,6 @@ local function flashEEPROM(biosContent, eepromCID)
   log("  WARN: Actual EEPROM flashing requires manual operation in sandbox", "WARN")
   return true
 end
-
--- ============================================================================
--- MAIN INSTALLATION FLOW
--- ============================================================================
 
 local function main()
   log("========================================", "INFO")
