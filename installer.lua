@@ -1,363 +1,179 @@
 local component = require("component")
 local computer = require("computer")
 
-local INSTALLER_VERSION = "1.0.0"
+local INSTALLER_VERSION = "2.3.0-STABLE"
 
 local function log(msg, level)
   level = level or "INFO"
   print(string.format("[%s] %s", level, msg))
 end
 
-local function generateLockId(fingerprint)
-  local result = ""
-  local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-  
-  local seed = 0
-  for i = 1, #fingerprint do
-    seed = (seed * 31 + string.byte(fingerprint, i)) % 2147483647
+local function fnv1a(str)
+  local hash = 2166136261
+  for i = 1, #str do
+    hash = hash ~ str:byte(i)
+    hash = (hash * 16777619) % 4294967296
   end
-  
-  for i = 1, 16 do
-    seed = (seed * 1103515245 + 12345) % 2147483647
-    result = result .. string.sub(chars, (seed % #chars) + 1, (seed % #chars) + 1)
-  end
-  
-  return result
+  return string.format("%08x", hash)
 end
 
-local function getComponentCID(componentType, index)
-  index = index or 1
-  local count = 0
-  for address in component.list(componentType) do
-    count = count + 1
-    if count == index then
-      return address
+local function findSystemFS()
+  for addr in component.list("filesystem") do
+    local fs = component.proxy(addr)
+    if fs and fs.exists("/init.lua") then
+      return addr
     end
   end
   return nil
 end
 
-local function collectCriticalComponents()
-  log("Collecting critical components...")
-  
-  local components = {}
-  
-  components.board = computer.address()
-  log("  [OK] Motherboard: " .. components.board, "INFO")
-  
-  local eepromCID = getComponentCID("eeprom")
-  if eepromCID then
-    components.eeprom = eepromCID
-    log("  [OK] EEPROM: " .. eepromCID, "INFO")
-  else
-    log("  [ERROR] EEPROM not found!", "ERROR")
-    return nil
+local function findGPU()
+  for addr in component.list("gpu") do
+    return addr
   end
-  
-  local fsCID = getComponentCID("filesystem")
-  if fsCID then
-    components.filesystem = fsCID
-    log("  [OK] Filesystem: " .. fsCID, "INFO")
-  else
-    log("  [ERROR] Filesystem not found!", "ERROR")
-    return nil
-  end
-  
-  return components
+  return nil
 end
 
-local function collectOptionalComponents()
-  log("Collecting optional components...")
-  
-  local optional = {}
-  
-  local gpuCID = getComponentCID("gpu")
-  if gpuCID then
-    optional.gpu = gpuCID
-    log("  [OK] GPU: " .. gpuCID, "INFO")
+local function generateLockId(fp)
+  local seed = 0
+  for i = 1, #fp do
+    seed = (seed * 31 + fp:byte(i)) % 2147483647
   end
-  
-  local screenCID = getComponentCID("screen")
-  if screenCID then
-    optional.screen = screenCID
-    log("  [OK] Screen: " .. screenCID, "INFO")
+  local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  local out = ""
+  for i = 1, 16 do
+    seed = (seed * 1103515245 + 12345) % 2147483647
+    local idx = (seed % #chars) + 1
+    out = out .. chars:sub(idx, idx)
   end
-  
-  local modemCID = getComponentCID("modem")
-  if modemCID then
-    optional.modem = modemCID
-    log("  [OK] Modem: " .. modemCID, "INFO")
-  end
-  
-  local robotCID = getComponentCID("robot")
-  if robotCID then
-    optional.robot = robotCID
-    log("  [OK] Robot: " .. robotCID, "INFO")
-  end
-  
-  local redstoneCID = getComponentCID("redstone")
-  if redstoneCID then
-    optional.redstone = redstoneCID
-    log("  [OK] Redstone: " .. redstoneCID, "INFO")
-  end
-  
-  return optional
+  return out
 end
 
-local function generateFingerprint(critical, optional)
-  log("Generating fingerprint...")
+local function collectCritical()
+  log("Collecting hardware APU fingerprint...")
   
-  local fpList = {}
+  local board = computer.address()
+  if not board then error("No motherboard") end
   
-  table.insert(fpList, "board:" .. critical.board)
-  table.insert(fpList, "eeprom:" .. critical.eeprom)
-  table.insert(fpList, "filesystem:" .. critical.filesystem)
-  
-  if optional.gpu then
-    table.insert(fpList, "gpu:" .. optional.gpu)
+  local eeprom = nil
+  for addr in component.list("eeprom") do
+    eeprom = addr
+    break
   end
-  if optional.screen then
-    table.insert(fpList, "screen:" .. optional.screen)
-  end
-  if optional.modem then
-    table.insert(fpList, "modem:" .. optional.modem)
-  end
-  if optional.robot then
-    table.insert(fpList, "robot:" .. optional.robot)
-  end
-  if optional.redstone then
-    table.insert(fpList, "redstone:" .. optional.redstone)
-  end
+  if not eeprom then error("No EEPROM") end
   
-  table.sort(fpList)
+  local fs = findSystemFS()
+  if not fs then error("No filesystem with /init.lua found") end
   
-  local fingerprint = table.concat(fpList, "|")
+  local gpu = findGPU()
+  if not gpu then error("No GPU/APU found - this system requires APU binding") end
   
-  log("  Fingerprint: " .. fingerprint, "INFO")
-  return fingerprint
+  log("Board (CPU): " .. board)
+  log("EEPROM: " .. eeprom)
+  log("GPU/APU: " .. gpu)
+  log("Filesystem: " .. fs)
+  
+  return {board = board, eeprom = eeprom, filesystem = fs, gpu = gpu}
 end
 
-local function generateLicense(critical, optional, fingerprint)
-  log("Generating LICENSE structure...")
-  
-  local lockId = generateLockId(fingerprint)
-  
-  local license = {
-    board = critical.board,
-    eeprom = critical.eeprom,
-    filesystem = critical.filesystem,
-    fingerprint = fingerprint,
-    lockId = lockId,
-    serverEnabled = false,
-    serverAddress = "",
-    attempts = 3,
-    state = "OK"
-  }
-  
-  log("  Lock ID: " .. lockId, "INFO")
-  log("  Attempts: 3", "INFO")
-  log("  State: OK", "INFO")
-  
-  return license
+local function generateFingerprint(c)
+  return "b:" .. c.board .. "|e:" .. c.eeprom .. "|f:" .. c.filesystem .. "|g:" .. c.gpu
 end
 
-local function loadBiosTemplate(fsCID)
-  log("Loading BIOS template...")
-  
-  local templatePath = "/secure_bios_template.lua"
-  local fs = component.proxy(fsCID)
-  
-  if not fs then
-    log("  Cannot access filesystem", "ERROR")
-    return nil
+local function loadTemplate(fsAddr)
+  local fs = component.proxy(fsAddr)
+  if not fs then error("filesystem proxy failed") end
+  local path = "/secure_bios_template.lua"
+  if not fs.exists(path) then error("missing BIOS template") end
+  local h = fs.open(path, "r")
+  if not h then error("cannot open template") end
+  local data = ""
+  while true do
+    local chunk = fs.read(h, 4096)
+    if not chunk then break end
+    data = data .. chunk
   end
-  
-  if not fs.exists(templatePath) then
-    log("  Template not found at " .. templatePath, "ERROR")
-    return nil
-  end
-  
-  local handle, err = fs.open(templatePath, "r")
-  if not handle then
-    log("  Cannot open template file: " .. tostring(err), "ERROR")
-    return nil
-  end
-  
-  local content = ""
-  local chunk_size = 2048
-  
-  repeat
-    local chunk = fs.read(handle, chunk_size)
-    if chunk then
-      content = content .. chunk
-    else
-      break
-    end
-  until not chunk
-  
-  fs.close(handle)
-  
-  log("  Template loaded (" .. #content .. " bytes)", "INFO")
-  return content
+  fs.close(h)
+  return data
 end
 
-local function substitutePlaceholders(template, critical, optional, license)
-  log("Substituting placeholders...")
-  
-  local result = template
-  
-  result = result:gsub("{{BOARD_CID}}", license.board)
-  result = result:gsub("{{EEPROM_CID}}", license.eeprom)
-  result = result:gsub("{{FS_CID}}", license.filesystem)
-  
-  result = result:gsub("{{FINGERPRINT}}", license.fingerprint)
-  
-  result = result:gsub("{{LOCK_ID}}", license.lockId)
-  
-  log("  Substitution complete", "INFO")
-  return result
+local function buildBios(template, c, fingerprint, lockId, hashHex)
+  local t = template
+  t = t:gsub("{{FINGERPRINT}}", fingerprint)
+  t = t:gsub("{{LOCK_ID}}", lockId)
+  t = t:gsub("{{FINGERPRINT_HASH}}", hashHex)
+  return t
 end
 
-local function createBackup(biosContent, fsCID)
-  log("Creating BIOS backup...")
-  
-  local backupPath = "/tmp/backup_bios.lua"
-  local fs = component.proxy(fsCID)
-  
-  if not fs then
-    log("  Cannot access filesystem", "ERROR")
-    return false
+local function backupOriginalBIOS(fsAddr, eepromAddr)
+  local fs = component.proxy(fsAddr)
+  local eeprom = component.proxy(eepromAddr)
+  if not fs or not eeprom then return false end
+  local originalBIOS = eeprom.get()
+  if not originalBIOS or #originalBIOS == 0 then return false end
+  if not fs.exists("/secureboot") then
+    fs.makeDirectory("/secureboot")
   end
-  
-  if not fs.exists("/tmp") then
-    fs.makeDirectory("/tmp")
-  end
-  
-  local handle, err = fs.open(backupPath, "w")
-  if not handle then
-    log("  Cannot create backup: " .. tostring(err), "ERROR")
-    return false
-  end
-  
-  fs.write(handle, biosContent)
-  fs.close(handle)
-  
-  log("  Backup created: " .. backupPath, "INFO")
+  local h = fs.open("/secureboot/original_bios_backup.lua", "w")
+  if not h then return false end
+  fs.write(h, originalBIOS)
+  fs.close(h)
+  log("Original BIOS backed up to /secureboot/original_bios_backup.lua", "INFO")
   return true
 end
 
-local function flashEEPROM(biosContent, eepromCID, fsCID)
+local function flash(eepromAddr, bios)
+  if #bios > 4096 then
+    error("BIOS exceeds EEPROM limit (4KB)")
+  end
+  local eeprom = component.proxy(eepromAddr)
+  if not eeprom then error("EEPROM unavailable") end
   log("Flashing EEPROM...")
-  
-  if #biosContent > 4096 then
-    log("  BIOS too large (" .. #biosContent .. " > 4096 bytes)", "ERROR")
-    return false
-  end
-  
-  local eeprom = component.proxy(eepromCID)
-  if not eeprom then
-    log("  Cannot access EEPROM", "ERROR")
-    return false
-  end
-  
-  log("  BIOS size: " .. #biosContent .. " bytes", "INFO")
-  log("  EEPROM capacity: 4096 bytes", "INFO")
-  
-  print("")
-  print("WARNING: This will flash the EEPROM with SecureBoot DRM")
-  print("System will be locked on next boot until unlocked with ID")
-  print("")
-  io.write("Proceed with EEPROM flashing? (y/n): ")
-  io.flush()
-  local input = io.read()
-  
-  if input:lower() == "y" or input:lower() == "yes" then
-    log("Starting EEPROM flash...", "INFO")
-    
-    log("  Clearing EEPROM...", "INFO")
-    eeprom.setData()
-    
-    log("  Writing BIOS to EEPROM...", "INFO")
-    eeprom.set(biosContent)
-    
-    log("  Setting boot address...", "INFO")
-    local bootAddr = getComponentCID("filesystem")
-    if bootAddr then
-      eeprom.setData(bootAddr)
-      log("  Boot address set to: " .. bootAddr, "INFO")
-    end
-    
-    eeprom.setLabel("SecureBoot")
-    log("  EEPROM label set to 'SecureBoot'", "INFO")
-    
-    log("  EEPROM flash completed successfully!", "INFO")
-    return true
-  else
-    log("EEPROM flashing cancelled by user", "INFO")
-    return false
-  end
+  eeprom.set(bios)
+  eeprom.setLabel("SecureBoot-APU")
+  return true
 end
 
 local function main()
-  log("========================================", "INFO")
-  log("OpenOS SecureBoot DRM Installer v" .. INSTALLER_VERSION, "INFO")
-  log("========================================", "INFO")
+  log("======================================")
+  log(" SecureBoot APU Installer " .. INSTALLER_VERSION)
+  log("======================================")
+
+  local c = collectCritical()
   
-  local critical = collectCriticalComponents()
-  if not critical then
-    log("Installation failed: missing critical components", "ERROR")
-    return false
+  local fingerprint = generateFingerprint(c)
+  local hashHex = fnv1a(fingerprint)
+  local lockId = generateLockId(fingerprint)
+
+  log("Fingerprint: " .. fingerprint)
+  log("Hash (HEX): " .. hashHex)
+  log("LockID: " .. lockId)
+
+  backupOriginalBIOS(c.filesystem, c.eeprom)
+
+  local template = loadTemplate(c.filesystem)
+  local bios = buildBios(template, c, fingerprint, lockId, hashHex)
+  
+  log("BIOS size: " .. #bios .. " bytes", "INFO")
+  
+  if #bios > 4096 then
+    error("BIOS too large: " .. #bios .. " > 4096")
   end
-  
-  print("")
-  
-  local optional = collectOptionalComponents()
-  
-  print("")
-  
-  local fingerprint = generateFingerprint(critical, optional)
-  
-  print("")
-  
-  local license = generateLicense(critical, optional, fingerprint)
-  
-  print("")
-  
-  local biosTemplate = loadBiosTemplate(critical.filesystem)
-  if not biosTemplate then
-    log("Installation failed: BIOS template not found", "ERROR")
-    return false
-  end
-  
-  print("")
-  
-  local finalBios = substitutePlaceholders(biosTemplate, critical, optional, license)
-  
-  print("")
-  
-  if not createBackup(finalBios, critical.filesystem) then
-    log("Installation failed: cannot create backup", "ERROR")
-    return false
-  end
-  
-  print("")
-  
-  if not flashEEPROM(finalBios, critical.eeprom, critical.filesystem) then
-    log("Installation failed: EEPROM flashing cancelled or failed", "ERROR")
-    return false
-  end
-  
-  print("")
-  log("========================================", "INFO")
-  log("Installation completed successfully!", "INFO")
-  log("========================================", "INFO")
-  log("System will be locked on next boot.", "INFO")
-  log("Unlock ID: " .. license.lockId, "INFO")
-  log("Keep this ID safe!", "INFO")
-  
+
+  flash(c.eeprom, bios)
+
+  log("======================================")
+  log("INSTALL COMPLETE")
+  log("")
+  log("🔐 LOCK ID: " .. lockId)
+  log("🔑 HASH: " .. hashHex)
+  log("🖥️  GPU/APU BIND: " .. c.gpu)
+  log("")
+  log("⚠️  GPU/APU binded to license")
+  log("")
+  log("======================================")
+
   return true
 end
 
-if not main() then
-  os.exit(1)
-end
+main()
